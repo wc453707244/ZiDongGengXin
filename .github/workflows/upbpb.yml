@@ -16,18 +16,15 @@ on:
 permissions:
   contents: write
 
-# 🎯 关键修复：启用 Node.js 24 支持，避免 2026 年弃用问题
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
-        uses: actions/checkout@v4
+        # 🎯 升级: v4 → v6 (支持 Node.js 24)
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # 获取完整历史，便于提交
+          fetch-depth: 0
 
       - name: 设置环境
         run: |
@@ -39,13 +36,11 @@ jobs:
           sudo apt-get update && sudo apt-get install -y jq curl unzip
 
       - name: 检查并更新 Worker
-        id: check_update  # 🔧 添加 step id，用于输出变量
+        id: check_update
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 日志函数
           log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
-
           log "开始检查更新..."
 
           # 获取本地版本
@@ -85,7 +80,7 @@ jobs:
           fi
           log "最新版本: $TAG_NAME"
 
-          # 🔧 设置 output 供后续步骤使用
+          # 设置 output 供后续步骤使用
           echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
 
           # 判断是否需要更新
@@ -113,8 +108,9 @@ jobs:
 
       - name: 提交更改
         if: success() && steps.check_update.outputs.updated == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
+        # 🎯 升级: @v5 → @v7 (支持 Node.js 24)
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name }}"
-          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
-          file_pattern: "*.js *.txt" # 可选：限制提交的文件类型
+          commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          file_pattern: "*.js *.txt"
