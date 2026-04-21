@@ -16,21 +16,32 @@ on:
 permissions:
   contents: write
 
+# 🎯 关键修复：启用 Node.js 24 支持，避免 2026 年弃用问题
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整历史，便于提交
 
       - name: 设置环境
         run: |
           echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases" >> $GITHUB_ENV
           echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
 
+      - name: 安装依赖
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq curl unzip
+
       - name: 检查并更新 Worker
+        id: check_update  # 🔧 添加 step id，用于输出变量
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub Token 认证
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 日志函数
           log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
@@ -43,40 +54,67 @@ jobs:
 
           # 获取最新 Release
           log "获取最新 Release 信息..."
-          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
-          if [ $? -ne 0 ]; then
-            log "ERROR: 无法访问 GitHub API"
+          RESPONSE=$(curl -s --retry 3 --retry-delay 2 \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$REPO_URL")
+          
+          if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+            log "ERROR: 无法访问 GitHub API 或返回为空"
             exit 1
           fi
 
-          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
+          # 检查 API 响应是否包含错误
+          if echo "$RESPONSE" | jq -e '.message' > /dev/null 2>&1; then
+            log "ERROR: GitHub API 返回错误: $(echo "$RESPONSE" | jq -r '.message')"
+            exit 1
+          fi
 
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-            log "ERROR: 未找到 $TARGET_FILE"
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name // empty')
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r --arg name "$TARGET_FILE" \
+            '.[0].assets[]? | select(.name == $name) | .browser_download_url // empty')
+
+          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "null" ]; then
+            log "ERROR: 无法获取最新版本号"
+            exit 1
+          fi
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            log "ERROR: 未找到 $TARGET_FILE 下载链接"
             exit 1
           fi
           log "最新版本: $TAG_NAME"
 
+          # 🔧 设置 output 供后续步骤使用
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+
           # 判断是否需要更新
           FORCE_UPDATE=${{ github.event.inputs.force_update || 'false' }}
           if [ "$LOCAL_VERSION" = "$TAG_NAME" ] && [ "$FORCE_UPDATE" != "true" ]; then
-            log "已是最新版本，无需更新"
+            log "✅ 已是最新版本 ($TAG_NAME)，无需更新"
+            echo "updated=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           # 下载并更新
-          log "下载 $TARGET_FILE..."
-          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
-          log "解压 $TARGET_FILE..."
-          unzip -o "$TARGET_FILE"
-          rm "$TARGET_FILE"
+          log "📥 下载 $TARGET_FILE..."
+          if ! wget -q --timeout=30 --tries=3 -O "$TARGET_FILE" "$DOWNLOAD_URL"; then
+            log "ERROR: 下载失败"
+            exit 1
+          fi
+          
+          log "📦 解压 $TARGET_FILE..."
+          unzip -o "$TARGET_FILE" -d .
+          rm -f "$TARGET_FILE"
+          
           echo "$TAG_NAME" > version.txt
-          log "更新完成，新版本: $TAG_NAME"
+          log "✅ 更新完成，新版本: $TAG_NAME"
+          echo "updated=true" >> $GITHUB_OUTPUT
 
       - name: 提交更改
-        if: success() # 仅在更新成功时提交
+        if: success() && steps.check_update.outputs.updated == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name || '未知' }}"
+          commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+          file_pattern: "*.js *.txt" # 可选：限制提交的文件类型
